@@ -104,30 +104,218 @@ class CameraLayer(Layer):
         kernel_size = blur_data.get('kernel_size', 15)
         return cv2.blur(frame, (kernel_size, kernel_size))
 
-class PoseLayer(Layer):
-    """Skeleton layer - only for pose detection visualization."""
+class BBoxLayer(Layer):
+    """Layer that draws bounding boxes (e.g., person detections)."""
     
-    def __init__(self, name: str = "Skeleton", alpha: float = 1.0, scaler=None):
-        """Initialize skeleton layer."""
+    def __init__(self, name: str = "BBoxes", alpha: float = 1.0, scaler=None):
         super().__init__(name, alpha, enabled=True)
+        
+        # Skeleton fade-out tracking
+        self.skeleton_fade_times = {}  # Track when skeletons disappeared
+        self.fade_duration = 0.5  # 0.5 seconds fade duration
+        self.last_skeleton_data = {}  # Store last known skeleton positions
+        self.distance_threshold = 300  # Pixels - if skeleton moves more than this, it's a new person
         self.scaler = scaler
-    
+
     def render(self, base_frame: np.ndarray, data: dict) -> np.ndarray:
-        """Render skeleton only."""
         if not self.enabled:
             return base_frame
-        
+
         frame = base_frame.copy()
-        pose_results = data.get('pose_results')
+        bboxes = data.get('bboxes') or []
+        face_contours = data.get('face_contours') or []
+        pose_lines = data.get('pose_lines') or []
+        hand_lines = data.get('hand_lines') or []
         
-        # Use the comprehensive pose detector to draw all landmarks
-        if pose_results and hasattr(self, 'pose_detector') and self.pose_detector:
-            frame = self.pose_detector.draw_comprehensive_pose(frame, pose_results, self.scaler)
+        current_time = time.time()
         
+        # Update skeleton tracking for fade-out
+        self._update_skeleton_tracking(pose_lines, hand_lines, face_contours, current_time)
+
+        for (x, y, w, h) in bboxes:
+            # Scale bbox coordinates if scaler is provided (camera->window)
+            if self.scaler:
+                x1, y1 = self.scaler.scale_coordinates(x, y)
+                x2, y2 = self.scaler.scale_coordinates(x + w, y + h)
+            else:
+                x1, y1 = x, y
+                x2, y2 = x + w, y + h
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+            # Draw label with count index
+            idx = bboxes.index((x, y, w, h)) + 1
+            label = f"P{idx}"
+            cv2.putText(frame, label, (x1, max(0, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+        # Draw face contours (if provided) with fade-out
+        for person_idx, contour in enumerate(face_contours):
+            if not contour:
+                continue
+            alpha = self._get_skeleton_alpha(person_idx, current_time)
+            if alpha > 0:
+                pts = np.array(contour, dtype=np.int32)
+                # No scaling needed: coordinates are already in window space if bboxes were scaled in app
+                color = (0, int(255 * alpha), 0)  # Green with alpha
+                cv2.polylines(frame, [pts], isClosed=True, color=color, thickness=2)
+
+        # Draw pose lines (skeleton) with fade-out
+        total_pose_segments = 0
+        for person_idx, person_lines in enumerate(pose_lines):
+            alpha = self._get_skeleton_alpha(person_idx, current_time)
+            if alpha > 0:
+                for (x1, y1, x2, y2) in person_lines:
+                    # Coordinates are already scaled to window in app
+                    color = (0, int(255 * alpha), 0)  # Green with alpha
+                    cv2.line(frame, (x1, y1), (x2, y2), color, 4, cv2.LINE_AA)
+                    # Joints for visibility
+                    cv2.circle(frame, (x1, y1), 4, (255, 255, 255), -1)
+                    cv2.circle(frame, (x1, y1), 2, color, -1)
+                    cv2.circle(frame, (x2, y2), 4, (255, 255, 255), -1)
+                    cv2.circle(frame, (x2, y2), 2, color, -1)
+                    total_pose_segments += 1
+        # Debug: if present, mark the first joint with a big dot
+        if pose_lines and pose_lines[0]:
+            x1, y1, x2, y2 = pose_lines[0][0]
+            cv2.circle(frame, (x1, y1), 8, (0, 0, 255), -1)
+
+        # Draw hand lines with fade-out
+        total_hand_segments = 0
+        for person_idx, person_hands in enumerate(hand_lines):
+            alpha = self._get_skeleton_alpha(person_idx, current_time)
+            if alpha > 0:
+                for (x1, y1, x2, y2) in person_hands:
+                    color = (int(255 * alpha), 0, int(255 * alpha))  # Magenta with alpha
+                    cv2.line(frame, (x1, y1), (x2, y2), color, 4, cv2.LINE_AA)
+                    cv2.circle(frame, (x1, y1), 3, (255, 255, 255), -1)
+                    cv2.circle(frame, (x1, y1), 2, color, -1)
+                    cv2.circle(frame, (x2, y2), 3, (255, 255, 255), -1)
+                    cv2.circle(frame, (x2, y2), 2, color, -1)
+                    total_hand_segments += 1
+
+        # On-screen debug counters (top-left)
+        cv2.putText(frame, f"pose_segments: {total_pose_segments}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+        cv2.putText(frame, f"hand_segments: {total_hand_segments}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,0,255), 2)
+
         self.render_count += 1
         self.last_render_time = time.time()
-        
         return frame
+    
+    def _update_skeleton_tracking(self, pose_lines, hand_lines, face_contours, current_time):
+        """Update skeleton tracking for fade-out effect."""
+        # Track current skeletons and their positions
+        current_skeletons = {}
+        
+        # Check pose lines and get center positions
+        for person_idx, person_lines in enumerate(pose_lines):
+            if person_lines:  # If person has pose data
+                center_pos = self._get_skeleton_center(person_lines)
+                current_skeletons[person_idx] = center_pos
+        
+        # Check hand lines and get center positions
+        for person_idx, person_hands in enumerate(hand_lines):
+            if person_hands:  # If person has hand data
+                center_pos = self._get_skeleton_center(person_hands)
+                if person_idx in current_skeletons:
+                    # Use average of pose and hand centers
+                    current_skeletons[person_idx] = (
+                        (current_skeletons[person_idx][0] + center_pos[0]) // 2,
+                        (current_skeletons[person_idx][1] + center_pos[1]) // 2
+                    )
+                else:
+                    current_skeletons[person_idx] = center_pos
+        
+        # Check face contours and get center positions
+        for person_idx, contour in enumerate(face_contours):
+            if contour:  # If person has face data
+                center_pos = self._get_contour_center(contour)
+                if person_idx in current_skeletons:
+                    # Use average of existing and face centers
+                    current_skeletons[person_idx] = (
+                        (current_skeletons[person_idx][0] + center_pos[0]) // 2,
+                        (current_skeletons[person_idx][1] + center_pos[1]) // 2
+                    )
+                else:
+                    current_skeletons[person_idx] = center_pos
+        
+        # Check for position jumps (new person in different location)
+        for person_idx, current_pos in current_skeletons.items():
+            if person_idx in self.last_skeleton_data:
+                last_pos = self.last_skeleton_data[person_idx]
+                distance = ((current_pos[0] - last_pos[0])**2 + (current_pos[1] - last_pos[1])**2)**0.5
+                
+                if distance > self.distance_threshold:
+                    # Person moved too far - treat as new person, fade out old position
+                    print(f"Person {person_idx} moved {distance:.1f} pixels - triggering fade-out")
+                    self.skeleton_fade_times[person_idx] = current_time
+        
+        # Update fade times for disappeared skeletons
+        for person_idx in list(self.skeleton_fade_times.keys()):
+            if person_idx not in current_skeletons:
+                # Skeleton disappeared, start fade timer if not already started
+                if person_idx not in self.skeleton_fade_times:
+                    self.skeleton_fade_times[person_idx] = current_time
+            else:
+                # Skeleton is present and hasn't moved too far, remove from fade tracking
+                if person_idx in self.skeleton_fade_times:
+                    del self.skeleton_fade_times[person_idx]
+        
+        # Clean up old fade times (skeletons that have completely faded)
+        for person_idx in list(self.skeleton_fade_times.keys()):
+            if current_time - self.skeleton_fade_times[person_idx] > self.fade_duration:
+                del self.skeleton_fade_times[person_idx]
+        
+        # Update last known positions
+        self.last_skeleton_data = current_skeletons.copy()
+    
+    def _get_skeleton_alpha(self, person_idx, current_time):
+        """Get alpha value for skeleton fade-out effect."""
+        if person_idx in self.skeleton_fade_times:
+            # Skeleton is fading out
+            fade_elapsed = current_time - self.skeleton_fade_times[person_idx]
+            if fade_elapsed >= self.fade_duration:
+                return 0.0  # Completely faded
+            else:
+                # Linear fade from 1.0 to 0.0
+                alpha = 1.0 - (fade_elapsed / self.fade_duration)
+                return max(0.0, alpha)
+        else:
+            # Skeleton is present and visible
+            return 1.0
+    
+    def _get_skeleton_center(self, lines):
+        """Get center position of skeleton lines."""
+        if not lines:
+            return (0, 0)
+        
+        x_coords = []
+        y_coords = []
+        for (x1, y1, x2, y2) in lines:
+            x_coords.extend([x1, x2])
+            y_coords.extend([y1, y2])
+        
+        if x_coords and y_coords:
+            center_x = sum(x_coords) // len(x_coords)
+            center_y = sum(y_coords) // len(y_coords)
+            return (center_x, center_y)
+        return (0, 0)
+    
+    def _get_contour_center(self, contour):
+        """Get center position of face contour."""
+        if not contour:
+            return (0, 0)
+        
+        pts = np.array(contour, dtype=np.int32)
+        if len(pts) > 0:
+            # Calculate centroid
+            moments = cv2.moments(pts)
+            if moments['m00'] != 0:
+                cx = int(moments['m10'] / moments['m00'])
+                cy = int(moments['m01'] / moments['m00'])
+                return (cx, cy)
+        
+        # Fallback: use bounding box center
+        x, y, w, h = cv2.boundingRect(pts)
+        return (x + w // 2, y + h // 2)
 
 class LayerManager:
     """Manages rendering layers and composition."""

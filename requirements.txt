@@ -2,3 +2,4 @@ opencv-python<4.10
 numpy<2
 mediapipe
 python-dotenv
+ultralytics

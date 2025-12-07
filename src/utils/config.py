@@ -17,6 +17,10 @@ class Config:
         self.CAMERA_INDEX = int(os.getenv('CAMERA_INDEX', '0'))
         self.CAMERA_WIDTH = int(os.getenv('CAMERA_WIDTH', '640'))
         self.CAMERA_HEIGHT = int(os.getenv('CAMERA_HEIGHT', '480'))
+        self.CAMERA_FPS = int(os.getenv('CAMERA_FPS', '30'))
+        self.USE_MJPEG_CODEC = os.getenv('USE_MJPEG_CODEC', 'true').lower() == 'true'
+        self.CAMERA_BUFFER_SIZE = int(os.getenv('CAMERA_BUFFER_SIZE', '1'))
+        self.CAMERA_FOURCC = os.getenv('CAMERA_FOURCC', 'MJPG')
         
         # Display window settings (fixed size)
         self.WINDOW_WIDTH = int(os.getenv('WINDOW_WIDTH', '1920'))
@@ -41,6 +45,7 @@ class Config:
         self.POSE_PRESENCE_CONFIDENCE = float(os.getenv('POSE_PRESENCE_CONFIDENCE', '0.5'))
         self.MAX_PEOPLE_IN_FRAME = int(os.getenv('MAX_PEOPLE_IN_FRAME', '4'))
         self.ENABLE_POSE_DETECTION = os.getenv('ENABLE_POSE_DETECTION', 'false').lower() == 'true'
+        self.MODEL_COMPLEXITY = int(os.getenv('MODEL_COMPLEXITY', '1'))
         
         # Detailed pose visualization control
         self.SHOW_BODY_LANDMARKS = os.getenv('SHOW_BODY_LANDMARKS', 'true').lower() == 'true'
@@ -53,20 +58,9 @@ class Config:
         self.LANDMARK_CIRCLE_RADIUS = int(os.getenv('LANDMARK_CIRCLE_RADIUS', '4'))
         self.LANDMARK_THICKNESS = int(os.getenv('LANDMARK_THICKNESS', '3'))
         
-        # Performance optimization settings
-        self.POSE_DETECTION_SKIP_FRAMES = int(os.getenv('POSE_DETECTION_SKIP_FRAMES', '1'))
-        self.POSE_RESULT_CACHE_TIME = float(os.getenv('POSE_RESULT_CACHE_TIME', '0.2'))
+        # Thread queue settings (simplified)
         self.FRAME_QUEUE_SIZE = int(os.getenv('FRAME_QUEUE_SIZE', '2'))
         self.RESULT_QUEUE_SIZE = int(os.getenv('RESULT_QUEUE_SIZE', '1'))
-        
-        # Adaptive performance settings
-        self.ENABLE_ADAPTIVE_PERFORMANCE = os.getenv('ENABLE_ADAPTIVE_PERFORMANCE', 'true').lower() == 'true'
-        self.MIN_SKIP_FRAMES = int(os.getenv('MIN_SKIP_FRAMES', '1'))
-        self.MAX_SKIP_FRAMES = int(os.getenv('MAX_SKIP_FRAMES', '4'))
-        self.MIN_CACHE_TIME = float(os.getenv('MIN_CACHE_TIME', '0.05'))
-        self.MAX_CACHE_TIME = float(os.getenv('MAX_CACHE_TIME', '0.3'))
-        self.MOVEMENT_THRESHOLD = float(os.getenv('MOVEMENT_THRESHOLD', '10.0'))
-        self.ADAPTATION_SMOOTHING = float(os.getenv('ADAPTATION_SMOOTHING', '0.1'))
         
         
         

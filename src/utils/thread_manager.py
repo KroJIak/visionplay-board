@@ -1,6 +1,6 @@
 """
 Simplified thread manager for VisionPlay Board.
-Only pose detection runs in separate thread, camera runs in main thread.
+Runs person detection (HOG) in a separate thread; camera runs in main thread.
 """
 
 import threading
@@ -10,13 +10,13 @@ import cv2
 import numpy as np
 from typing import Optional, Dict, Any
 
-class PoseDetectionThread:
-    """Thread for pose detection only."""
+class DetectionThread:
+    """Thread for person detection only (produces bounding boxes)."""
     
-    def __init__(self, pose_detector, frame_queue: queue.Queue, 
+    def __init__(self, detector, frame_queue: queue.Queue, 
                  result_queue: queue.Queue):
-        """Initialize pose detection thread."""
-        self.pose_detector = pose_detector
+        """Initialize detection thread."""
+        self.detector = detector
         self.frame_queue = frame_queue
         self.result_queue = result_queue
         
@@ -26,21 +26,21 @@ class PoseDetectionThread:
         self.frame_count = 0
         
     def start(self):
-        """Start pose detection thread."""
+        """Start detection thread."""
         if self.running:
             return
         
         self.running = True
         self.thread = threading.Thread(target=self._detection_loop, daemon=True)
         self.thread.start()
-        print("Pose detection thread started")
+        print("Detection thread started")
     
     def stop(self):
-        """Stop pose detection thread."""
+        """Stop detection thread."""
         self.running = False
         if self.thread:
             self.thread.join(timeout=2.0)
-        print("Pose detection thread stopped")
+        print("Detection thread stopped")
     
     def _detection_loop(self):
         """Main detection loop."""
@@ -49,12 +49,33 @@ class PoseDetectionThread:
                 # Get frame from queue with shorter timeout for more responsive processing
                 frame = self.frame_queue.get(timeout=0.05)
                 
-                # Process frame (skip pose detection if disabled)
+                # Process frame
                 start_time = time.time()
-                pose_results = None
-                if self.pose_detector and hasattr(self.pose_detector, 'detect_all'):
-                    pose_results = self.pose_detector.detect_all(frame)
+                bboxes = []
+                face_contours = []
+                pose_lines = []
+                hand_lines = []
+                if self.detector and hasattr(self.detector, 'detect'):
+                    try:
+                        det_out = self.detector.detect(frame)
+                        if isinstance(det_out, dict):
+                            bboxes = det_out.get('bboxes', [])
+                            face_contours = det_out.get('face_contours', [])
+                            pose_lines = det_out.get('pose_lines', [])
+                            hand_lines = det_out.get('hand_lines', [])
+                        else:
+                            bboxes = det_out
+                    except Exception as e:
+                        print(f"[Debug] Detection error: {e}")
+                        bboxes = []
+                        face_contours = []
+                        pose_lines = []
+                        hand_lines = []
                 processing_time = time.time() - start_time
+                
+                # Debug: log slow detection
+                if processing_time > 0.1:  # More than 100ms
+                    print(f"[Debug] Slow detection: {processing_time:.3f}s")
                 
                 # Update statistics
                 self.processing_time = processing_time
@@ -63,7 +84,10 @@ class PoseDetectionThread:
                 # Always put result in queue, replacing oldest if needed
                 result = {
                     'frame': frame,
-                    'pose_results': pose_results,
+                    'bboxes': bboxes,
+                    'face_contours': face_contours,
+                    'pose_lines': pose_lines,
+                    'hand_lines': hand_lines,
                     'timestamp': time.time(),
                     'processing_time': processing_time
                 }
@@ -83,7 +107,7 @@ class PoseDetectionThread:
             except queue.Empty:
                 continue
             except Exception as e:
-                print(f"Error in pose detection thread: {e}")
+                print(f"Error in detection thread: {e}")
                 continue
     
     def get_stats(self) -> Dict[str, Any]:
@@ -95,79 +119,95 @@ class PoseDetectionThread:
         }
 
 class ThreadManager:
-    """Simplified thread manager - only manages pose detection thread."""
+    """Simplified thread manager - manages detection thread (HOG)."""
     
     def __init__(self, config):
         """Initialize thread manager."""
         self.config = config
-        self.pose_thread = None
+        self.det_thread = None
         
         # Queues for communication between threads
         self.frame_queue = queue.Queue(maxsize=config.FRAME_QUEUE_SIZE)
         self.result_queue = queue.Queue(maxsize=config.RESULT_QUEUE_SIZE)
         
-        # Buffer for last pose result to prevent flickering
-        self.last_pose_result = None
-        self.last_pose_timestamp = 0
-        self.pose_result_lock = threading.Lock()
+        # Buffer for last bboxes result to prevent flickering
+        self.last_bboxes = []
+        self.last_face_contours = []
+        self.last_pose_lines = []
+        self.last_hand_lines = []
+        self.last_result_timestamp = 0
+        self.result_lock = threading.Lock()
+        self.has_valid_result = False
         
         # Statistics
         self.start_time = None
         self.total_frames_processed = 0
         
-    def start(self, pose_detector):
-        """Start pose detection thread."""
-        if self.pose_thread:
-            print("Pose thread already running")
+    def start(self, detector):
+        """Start detection thread."""
+        if self.det_thread:
+            print("Detection thread already running")
             return
         
-        # Start pose detection thread
-        self.pose_thread = PoseDetectionThread(
-            pose_detector,
+        # Start detection thread
+        self.det_thread = DetectionThread(
+            detector,
             self.frame_queue,
             self.result_queue
         )
-        self.pose_thread.start()
+        self.det_thread.start()
         
         self.start_time = time.time()
-        print("Pose detection thread started")
+        print("Detection thread started")
     
     def stop(self):
         """Stop all threads."""
-        if self.pose_thread:
-            self.pose_thread.stop()
-            self.pose_thread = None
+        if self.det_thread:
+            self.det_thread.stop()
+            self.det_thread = None
         
         print("All threads stopped")
     
-    def get_latest_result(self, adaptive_cache_time: float = None) -> Optional[Dict[str, Any]]:
-        """Get latest result from pose detection thread."""
+    def get_latest_result(self) -> Optional[Dict[str, Any]]:
+        """Get latest result from detection thread."""
         # Try to get new result first
         try:
             new_result = self.result_queue.get_nowait()
             # Update last result buffer
-            with self.pose_result_lock:
-                self.last_pose_result = new_result.get('pose_results')
-                self.last_pose_timestamp = new_result.get('timestamp', 0)
+            with self.result_lock:
+                self.last_bboxes = new_result.get('bboxes', [])
+                self.last_face_contours = new_result.get('face_contours', [])
+                self.last_pose_lines = new_result.get('pose_lines', [])
+                self.last_hand_lines = new_result.get('hand_lines', [])
+                self.last_result_timestamp = new_result.get('timestamp', 0)
+                self.has_valid_result = True
             return new_result
         except queue.Empty:
-            # No new result, return last known result if it's recent enough
-            with self.pose_result_lock:
-                current_time = time.time()
-                # Use adaptive cache time if provided, otherwise use config default
-                cache_time = adaptive_cache_time if adaptive_cache_time is not None else self.config.POSE_RESULT_CACHE_TIME
-                if (self.last_pose_result is not None and 
-                    current_time - self.last_pose_timestamp < cache_time):
+            # No new result, return last known result if we have one
+            with self.result_lock:
+                if self.has_valid_result:
                     return {
                         'frame': None,  # We don't have the frame, but that's OK
-                        'pose_results': self.last_pose_result,
-                        'timestamp': self.last_pose_timestamp,
+                        'bboxes': self.last_bboxes,
+                        'face_contours': self.last_face_contours,
+                        'pose_lines': self.last_pose_lines,
+                        'hand_lines': self.last_hand_lines,
+                        'timestamp': self.last_result_timestamp,
                         'processing_time': 0
                     }
-            return None
+            # Return empty result if no valid result yet
+            return {
+                'frame': None,
+                'bboxes': [],
+                'face_contours': [],
+                'pose_lines': [],
+                'hand_lines': [],
+                'timestamp': 0,
+                'processing_time': 0
+            }
     
     def put_frame_for_processing(self, frame: np.ndarray):
-        """Put frame in queue for pose detection processing."""
+        """Put frame in queue for detection processing."""
         # Keep queue small to reduce latency
         max_size = self.config.FRAME_QUEUE_SIZE
         if self.frame_queue.qsize() >= max_size:
@@ -188,7 +228,7 @@ class ThreadManager:
             'uptime': time.time() - self.start_time if self.start_time else 0
         }
         
-        if self.pose_thread:
-            stats['pose_thread'] = self.pose_thread.get_stats()
+        if self.det_thread:
+            stats['det_thread'] = self.det_thread.get_stats()
         
         return stats

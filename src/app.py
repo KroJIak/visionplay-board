@@ -9,12 +9,13 @@ import random
 from typing import List, Optional, Tuple
 
 from .utils.config import Config
-from .utils.pose_detector import PoseDetector
-from .utils.layers import LayerManager, CameraLayer, PoseLayer
+from .utils.layers import LayerManager, CameraLayer, BBoxLayer
 from .utils.thread_manager import ThreadManager
+from .utils.yolo_person_detector import YoloPersonDetector
+from .utils.yolo_holistic_detector import YoloHolisticDetector
 from .utils.scaling import AdaptiveScaler
-from .utils.adaptive_performance import AdaptivePerformanceManager
 from .games.skeleton_viewer_game import SkeletonViewerGame
+from .games.hide_and_seek_game import HideAndSeekGame
 
 class GameTile:
     """Represents a game tile on the main menu."""
@@ -40,16 +41,17 @@ class VisionPlayApp:
         """Initialize the application."""
         self.config = Config()
         
-        # Initialize pose detector if enabled
-        self.pose_detector = None
+        # Initialize YOLO + FaceMesh detector (only if pose detection is enabled)
         if self.config.ENABLE_POSE_DETECTION:
-            self.pose_detector = PoseDetector(self.config)
+            self.detector = YoloHolisticDetector()
+            print("YOLO + FaceMesh detector initialized")
+        else:
+            self.detector = None
+            print("Pose detection disabled - detector not initialized")
         
         # Initialize thread manager
         self.thread_manager = ThreadManager(self.config)
         
-        # Initialize adaptive performance manager
-        self.adaptive_performance = AdaptivePerformanceManager(self.config)
         
         # Initialize camera in main thread
         self.cap = None
@@ -67,7 +69,8 @@ class VisionPlayApp:
         
         # Initialize games
         self.games = {
-            "Skeleton Viewer": SkeletonViewerGame(self.config, self.scaler, self.pose_detector)
+            "Skeleton Viewer": SkeletonViewerGame(self.config, self.scaler, None),
+            "Hide and Seek": HideAndSeekGame()
         }
         
         # Game state
@@ -90,9 +93,13 @@ class VisionPlayApp:
     
     def _init_camera(self):
         """Initialize camera in main thread."""
-        self.cap = cv2.VideoCapture(self.config.CAMERA_INDEX)
+        # Try V4L2 backend first for better Linux compatibility
+        self.cap = cv2.VideoCapture(self.config.CAMERA_INDEX, cv2.CAP_V4L2)
         if not self.cap.isOpened():
-            raise RuntimeError(f"Could not open camera {self.config.CAMERA_INDEX}")
+            # Fallback to default backend
+            self.cap = cv2.VideoCapture(self.config.CAMERA_INDEX)
+            if not self.cap.isOpened():
+                raise RuntimeError(f"Could not open camera {self.config.CAMERA_INDEX}")
         
         # Configure camera
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.CAMERA_WIDTH)
@@ -107,6 +114,10 @@ class VisionPlayApp:
         # Set buffer size to reduce latency
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, self.config.CAMERA_BUFFER_SIZE)
         
+        # Additional optimizations for better performance
+        self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)  # Disable autofocus
+        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # Manual exposure
+        
         # Verify camera settings
         actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -120,12 +131,10 @@ class VisionPlayApp:
         background_layer = CameraLayer("Background")
         self.layer_manager.add_layer(background_layer, order=0)
         
-        # Skeleton layer (pose detection only)
-        if self.config.ENABLE_POSE_DETECTION:
-            skeleton_layer = PoseLayer("Skeleton", alpha=1.0, scaler=self.scaler)
-            skeleton_layer.pose_detector = self.pose_detector
-            skeleton_layer.set_enabled(True)
-            self.layer_manager.add_layer(skeleton_layer, order=1)
+        # BBoxes layer (person detection only)
+        bbox_layer = BBoxLayer("BBoxes", alpha=1.0, scaler=self.scaler)
+        bbox_layer.set_enabled(True)
+        self.layer_manager.add_layer(bbox_layer, order=1)
     
     def _create_game_tiles(self) -> List[GameTile]:
         """Create game tiles for the main menu."""
@@ -181,19 +190,19 @@ class VisionPlayApp:
             # Reset human detection timer after starting random game
             self.human_detection_start = None
     
-    def _check_human_detection(self, pose_results):
-        """Check for human detection and start random game if timeout reached."""
-        if not self.config.ENABLE_POSE_DETECTION or not pose_results:
+    def _check_human_detection_from_bboxes(self, bboxes):
+        """Check for human detection using bboxes and start random game if timeout reached."""
+        # Only check if pose detection is enabled
+        if not self.config.ENABLE_POSE_DETECTION:
             return
-        
-        # Check if person is detected
-        if self.pose_detector and self.pose_detector.is_person_detected(pose_results):
-            if self.human_detection_start is None:
-                self.human_detection_start = time.time()
-            elif time.time() - self.human_detection_start >= self.human_detection_timeout:
-                self._start_random_game()
-                self.human_detection_start = None
-        else:
+            
+        if not bboxes:
+            self.human_detection_start = None
+            return
+        if self.human_detection_start is None:
+            self.human_detection_start = time.time()
+        elif time.time() - self.human_detection_start >= self.human_detection_timeout:
+            self._start_random_game()
             self.human_detection_start = None
     
     def _update_fps(self):
@@ -391,20 +400,11 @@ class VisionPlayApp:
         """Show performance statistics."""
         stats = self.thread_manager.get_stats()
         layer_stats = self.layer_manager.get_all_stats()
-        adaptive_stats = self.adaptive_performance.get_stats()
-        
         print("\n=== Performance Statistics ===")
         print(f"Main thread FPS: {self.current_fps:.1f}")
         if 'pose_thread' in stats:
             print(f"Pose processing time: {stats['pose_thread'].get('processing_time', 0):.3f}s")
             print(f"Pose frames processed: {stats['pose_thread'].get('frame_count', 0)}")
-        
-        print("\n=== Adaptive Performance ===")
-        print(f"Enabled: {adaptive_stats['enabled']}")
-        print(f"Current skip frames: {adaptive_stats['current_skip_frames']}")
-        print(f"Current cache time: {adaptive_stats['current_cache_time']:.3f}s")
-        print(f"Adaptations: {adaptive_stats['adaptation_count']}")
-        print(f"Avg movement speed: {adaptive_stats['avg_movement_speed']:.1f} px/frame")
         
         print("\n=== Layer Statistics ===")
         for layer_name, layer_stat in layer_stats.items():
@@ -417,8 +417,11 @@ class VisionPlayApp:
         print("Starting VisionPlay Board application...")
         print("Press ESC to exit, click on tiles to start games")
         
-        # Start all threads
-        self.thread_manager.start(self.pose_detector)
+        # Start detection thread (only if pose detection is enabled)
+        if self.config.ENABLE_POSE_DETECTION and self.detector:
+            self.thread_manager.start(self.detector)
+        else:
+            print("Detection thread not started - pose detection disabled")
         
         # Create window
         window_name = self.config.WINDOW_TITLE
@@ -441,24 +444,40 @@ class VisionPlayApp:
                 # Mirror the frame horizontally
                 frame = cv2.flip(frame, 1)
                 
-                # Get latest pose detection result first
-                result = self.thread_manager.get_latest_result()
-                pose_results = result.get('pose_results') if result else None
+                # Clear camera buffer to get latest frame (prevent lag)
+                # Read and discard old frames to get the freshest one
+                for _ in range(1):  # Only clear 1 frame to avoid too much lag
+                    ret, _ = self.cap.read()
+                    if not ret:
+                        break
                 
-                # Update adaptive performance settings
-                skip_frames, cache_time = self.adaptive_performance.update(pose_results)
-                
-                # Scale frame to window dimensions FIRST
+                # Scale frame to window dimensions FIRST (most important for display)
                 scaled_frame = self.scaler.scale_frame(frame)
                 
-                # Send ORIGINAL frame to pose detection thread (with adaptive frame skipping)
+                # Send frame to detection thread (only if pose detection is enabled)
                 self.frame_counter += 1
-                if self.frame_counter % skip_frames == 0:
-                    self.thread_manager.put_frame_for_processing(frame)  # Original frame for MediaPipe
-                
-                # Get latest pose detection result with adaptive cache time
-                result = self.thread_manager.get_latest_result(cache_time)
-                pose_results = result.get('pose_results') if result else None
+                if self.config.ENABLE_POSE_DETECTION and self.detector:
+                    # Process every frame (no skipping)
+                    self.thread_manager.put_frame_for_processing(frame)
+                    
+                    # Get latest detection result
+                    result = self.thread_manager.get_latest_result()
+                    bboxes = result.get('bboxes') if result else []
+                    face_contours = result.get('face_contours') if result else []
+                    pose_lines = result.get('pose_lines') if result else []
+                    hand_lines = result.get('hand_lines') if result else []
+                    
+                    # Debug: log when detection results are empty
+                    if not bboxes and not pose_lines and not hand_lines:
+                        print(f"[Debug] Empty detection result at frame {self.frame_counter}")
+                    elif bboxes or pose_lines or hand_lines:
+                        print(f"[Debug] Detection OK: {len(bboxes)} bboxes, {sum(len(pl) for pl in pose_lines)} pose_segments, {sum(len(hl) for hl in hand_lines)} hand_segments")
+                else:
+                    # No detection - empty results
+                    bboxes = []
+                    face_contours = []
+                    pose_lines = []
+                    hand_lines = []
                 
                 # Update FPS
                 self._update_fps()
@@ -468,8 +487,20 @@ class VisionPlayApp:
                 
                 if self.is_in_menu:
                     # Main menu mode
-                    self._check_human_detection(pose_results)
+                    self._check_human_detection_from_bboxes(bboxes)
                     layer_data['ui_elements'] = self._get_menu_ui_elements()
+                    layer_data['bboxes'] = bboxes
+                    layer_data['face_contours'] = self._scale_contours_to_window(face_contours)
+                    scaled_pose = self._scale_lines_to_window(pose_lines)
+                    scaled_hands = self._scale_lines_to_window(hand_lines)
+                    layer_data['pose_lines'] = scaled_pose
+                    layer_data['hand_lines'] = scaled_hands
+                    try:
+                        pose_segments_count = sum(len(pl) for pl in scaled_pose)
+                        hand_segments_count = sum(len(hl) for hl in scaled_hands)
+                        print(f"[Render Debug] pose_segments={pose_segments_count} hand_segments={hand_segments_count}")
+                    except Exception:
+                        pass
                     
                     # Render all layers
                     final_frame = self.layer_manager.render_all(scaled_frame, layer_data)
@@ -477,9 +508,16 @@ class VisionPlayApp:
                     # Game mode
                     if self.current_game:
                         # Let the game handle the frame
-                        game_result = self.current_game.update(scaled_frame, pose_results)
+                        # Prepare detection data for the game (scaled to window/game frame)
+                        detection_data_for_game = {
+                            'bboxes': bboxes,
+                            'face_contours': self._scale_contours_to_window(face_contours),
+                            'pose_lines': self._scale_lines_to_window(pose_lines),
+                            'hand_lines': self._scale_lines_to_window(hand_lines),
+                        }
+                        game_result = self.current_game.update(scaled_frame, detection_data_for_game)
                         if isinstance(game_result, tuple):
-                            final_frame, should_exit = game_result
+                            game_frame, should_exit = game_result
                             if should_exit:
                                 # Game wants to exit, return to menu
                                 self.current_game.stop()
@@ -487,11 +525,60 @@ class VisionPlayApp:
                                 self.current_game = None
                                 self.human_detection_start = None
                                 print("Game auto-exited due to no people detected")
+                                # After exit, render menu below
+                                layer_data['ui_elements'] = self._get_menu_ui_elements()
+                                layer_data['bboxes'] = bboxes
+                                final_frame = self.layer_manager.render_all(scaled_frame, layer_data)
+                                
+                                # Show and continue
+                            else:
+                                # Overlay BBox layer on top of game's frame unless game suppresses overlays
+                                if hasattr(self.current_game, 'people_count'):
+                                    self.current_game.people_count = min(len(bboxes), getattr(self.current_game, 'max_people', len(bboxes)))
+                                if getattr(self.current_game, 'suppress_overlay', False):
+                                    # Only render UI elements; hide bbox/contours/lines
+                                    layer_data['ui_elements'] = []
+                                    final_frame = game_frame
+                                else:
+                                    layer_data['bboxes'] = bboxes
+                                    layer_data['face_contours'] = self._scale_contours_to_window(face_contours)
+                                    scaled_pose = self._scale_lines_to_window(pose_lines)
+                                    scaled_hands = self._scale_lines_to_window(hand_lines)
+                                    layer_data['pose_lines'] = scaled_pose
+                                    layer_data['hand_lines'] = scaled_hands
+                                    try:
+                                        pose_segments_count = sum(len(pl) for pl in scaled_pose)
+                                        hand_segments_count = sum(len(hl) for hl in scaled_hands)
+                                        print(f"[Render Debug] (game) pose_segments={pose_segments_count} hand_segments={hand_segments_count}")
+                                    except Exception:
+                                        pass
+                                    final_frame = self.layer_manager.render_all(game_frame, layer_data)
                         else:
-                            final_frame = game_result
+                            game_frame = game_result
+                            # Overlay BBox layer on top of game's frame unless suppressed
+                            if hasattr(self.current_game, 'people_count'):
+                                self.current_game.people_count = min(len(bboxes), getattr(self.current_game, 'max_people', len(bboxes)))
+                            if getattr(self.current_game, 'suppress_overlay', False):
+                                layer_data['ui_elements'] = []
+                                final_frame = game_frame
+                            else:
+                                layer_data['bboxes'] = bboxes
+                                layer_data['face_contours'] = self._scale_contours_to_window(face_contours)
+                                scaled_pose = self._scale_lines_to_window(pose_lines)
+                                scaled_hands = self._scale_lines_to_window(hand_lines)
+                                layer_data['pose_lines'] = scaled_pose
+                                layer_data['hand_lines'] = scaled_hands
+                                try:
+                                    pose_segments_count = sum(len(pl) for pl in scaled_pose)
+                                    hand_segments_count = sum(len(hl) for hl in scaled_hands)
+                                    print(f"[Render Debug] (game2) pose_segments={pose_segments_count} hand_segments={hand_segments_count}")
+                                except Exception:
+                                    pass
+                                final_frame = self.layer_manager.render_all(game_frame, layer_data)
                     else:
                         # Fallback to menu if no game
                         layer_data['ui_elements'] = self._get_menu_ui_elements()
+                        layer_data['bboxes'] = bboxes
                         final_frame = self.layer_manager.render_all(scaled_frame, layer_data)
                 
                 # Display frame
@@ -543,11 +630,45 @@ class VisionPlayApp:
         # Close windows
         cv2.destroyAllWindows()
         
-        # Cleanup pose detector
-        if self.pose_detector:
-            self.pose_detector.cleanup()
+        # No specific cleanup needed for HOG detector
         
         print("Cleanup complete")
+
+    def _scale_contours_to_window(self, face_contours):
+        """Scale face contour coordinates from camera space to window space using scaler."""
+        if not face_contours:
+            return []
+        scaled = []
+        for contour in face_contours:
+            if not contour:
+                scaled.append([])
+                continue
+            scaled_pts = []
+            for (x, y) in contour:
+                sx, sy = self.scaler.scale_coordinates(x, y)
+                # Clamp to window bounds
+                sx = max(0, min(sx, self.config.WINDOW_WIDTH - 1))
+                sy = max(0, min(sy, self.config.WINDOW_HEIGHT - 1))
+                scaled_pts.append((sx, sy))
+            scaled.append(scaled_pts)
+        return scaled
+
+    def _scale_lines_to_window(self, lines_per_person):
+        if not lines_per_person:
+            return []
+        scaled_all = []
+        for lines in lines_per_person:
+            scaled_lines = []
+            for (x1, y1, x2, y2) in lines:
+                sx1, sy1 = self.scaler.scale_coordinates(x1, y1)
+                sx2, sy2 = self.scaler.scale_coordinates(x2, y2)
+                sx1 = max(0, min(sx1, self.config.WINDOW_WIDTH - 1))
+                sy1 = max(0, min(sy1, self.config.WINDOW_HEIGHT - 1))
+                sx2 = max(0, min(sx2, self.config.WINDOW_WIDTH - 1))
+                sy2 = max(0, min(sy2, self.config.WINDOW_HEIGHT - 1))
+                scaled_lines.append((sx1, sy1, sx2, sy2))
+            scaled_all.append(scaled_lines)
+        return scaled_all
 
 def main():
     """Main entry point."""

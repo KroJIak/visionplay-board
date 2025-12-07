@@ -56,8 +56,10 @@ class SkeletonViewerGame(BaseGame):
         # Create a copy of the frame
         game_frame = frame.copy()
         
-        # Count detected people
-        self.people_count = self._count_detected_people(pose_results)
+        # Count detected people (set externally from YOLO bboxes in app)
+        # Fallback to legacy counting if pose_results provided
+        if pose_results is not None:
+            self.people_count = self._count_detected_people(pose_results)
         
         # Check for auto-exit due to no people
         should_exit = self._check_auto_exit(pose_results)
