@@ -28,4 +28,5 @@ echo "Using Python version: $(python --version)"
 
 # Run the application
 echo "Starting application..."
+cd "$(dirname "$0")/.."
 python main.py

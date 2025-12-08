@@ -32,6 +32,9 @@ fi
 
 echo "Using Python version: $(python --version)"
 
+# Change to project root directory
+cd "$(dirname "$0")/.."
+
 # Install dependencies
 echo "Installing dependencies..."
 pip install -r requirements.txt

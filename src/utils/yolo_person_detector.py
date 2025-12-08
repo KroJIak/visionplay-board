@@ -4,6 +4,7 @@ Returns a list of bounding boxes (x, y, w, h) for detected persons (class id 0).
 """
 
 from typing import List, Tuple
+import os
 
 import cv2
 import numpy as np
@@ -17,9 +18,14 @@ except Exception:  # pragma: no cover
 class YoloPersonDetector:
     """Ultralytics YOLO person detector (CPU by default)."""
 
-    def __init__(self, model_name: str = "yolov8n.pt", conf: float = 0.35, iou: float = 0.45):
+    def __init__(self, model_name: str = "models/yolov8n.pt", conf: float = 0.35, iou: float = 0.45):
         if YOLO is None:
             raise RuntimeError("ultralytics is not installed. Please install with: pip install ultralytics")
+        # Resolve model path relative to project root
+        if not os.path.isabs(model_name):
+            # Get project root (assuming this file is in src/utils/)
+            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+            model_name = os.path.join(project_root, model_name)
         self.model = YOLO(model_name)
         self.conf = conf
         self.iou = iou

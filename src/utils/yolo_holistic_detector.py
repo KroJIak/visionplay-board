@@ -17,8 +17,9 @@ import mediapipe as mp
 
 
 class YoloHolisticDetector:
-    def __init__(self, yolo_model: str = "yolov8n.pt", conf: float = 0.35, iou: float = 0.45):
+    def __init__(self, yolo_model: str = "models/yolov8n.pt", conf: float = 0.35, iou: float = 0.45):
         self.config = Config()
+        # Path resolution is handled in YoloPersonDetector
         self.yolo = YoloPersonDetector(model_name=yolo_model, conf=conf, iou=iou)
         # Holistic for pose + hands + face in one pass
         self.mp_holistic = mp.solutions.holistic
