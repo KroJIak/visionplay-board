@@ -1,8 +1,24 @@
 [English](README.md) | [Русский](docs/README-RU.md)
 
+<div align="center">
+
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
+
+![OpenCV](https://img.shields.io/badge/OpenCV-4.9-5C3EE8?style=for-the-badge&logo=opencv&logoColor=white)
+
+![MediaPipe](https://img.shields.io/badge/MediaPipe-0.10-FF6F00?style=for-the-badge&logo=google&logoColor=white)
+
+![YOLO](https://img.shields.io/badge/YOLO-Ultralytics-00FFFF?style=for-the-badge&logo=yolo&logoColor=black)
+
+![NumPy](https://img.shields.io/badge/NumPy-<2.0-013243?style=for-the-badge&logo=numpy&logoColor=white)
+
+![Computer Vision](https://img.shields.io/badge/Computer%20Vision-Active-FF6B6B?style=for-the-badge&logo=opencv&logoColor=white)
+
+</div>
+
 # VisionPlay Board
 
-Interactive computer vision game application for electronic board.
+> Interactive computer vision game application for electronic board that enables gesture-controlled games using OpenCV and MediaPipe pose detection.
 
 ## Description
 
